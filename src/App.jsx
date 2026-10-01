@@ -909,44 +909,68 @@ const PRESENCE_CLEANUP_MS = 5 * 60 * 1000; // dopo quanto una voce "morta" viene
 
 /* ---------------------------------------------------------
    NOTIFICHE EMAIL (EmailJS) — per attivarle, crea un account gratuito su
-   https://www.emailjs.com, crea un "Email Service" e un "Email Template"
-   con le variabili {{to_email}}, {{to_name}}, {{event_name}}, {{event_when}},
-   {{material_list}}, {{google_calendar_link}}, {{outlook_calendar_link}},
-   poi sostituisci i tre valori sotto con quelli reali del tuo account, e
+   https://www.emailjs.com, crea un "Email Service" e DUE "Email Template":
+   1) EMAILJS_TEMPLATE_ID — notifiche di evento, variabili {{to_email}},
+      {{to_name}}, {{event_name}}, {{event_when}}, {{material_list}},
+      {{google_calendar_link}}, {{outlook_calendar_link}}.
+   2) EMAILJS_TEMPLATE_ID_CREDENTIALS — invio password personale, variabili
+      {{to_email}}, {{to_name}}, {{password}}.
+   Poi sostituisci i valori sotto con quelli reali del tuo account, e
    RESPONSABILE_NOTIFICATION_EMAIL con l'indirizzo email fisso a cui inviare
    il riepilogo delle modifiche condivise. Finché restano "INSERISCI_...",
    l'invio delle email viene semplicemente saltato (nessun errore visibile).
 --------------------------------------------------------- */
 const EMAILJS_SERVICE_ID = "INSERISCI_SERVICE_ID";
 const EMAILJS_TEMPLATE_ID = "INSERISCI_TEMPLATE_ID";
+const EMAILJS_TEMPLATE_ID_CREDENTIALS = "INSERISCI_TEMPLATE_ID_CREDENZIALI";
 const EMAILJS_PUBLIC_KEY = "INSERISCI_PUBLIC_KEY";
 const RESPONSABILE_NOTIFICATION_EMAIL = "INSERISCI_EMAIL_RESPONSABILE";
 
-function emailNotificationsConfigured() {
-  return (
-    EMAILJS_SERVICE_ID &&
-    !EMAILJS_SERVICE_ID.startsWith("INSERISCI") &&
-    EMAILJS_TEMPLATE_ID &&
-    !EMAILJS_TEMPLATE_ID.startsWith("INSERISCI") &&
-    EMAILJS_PUBLIC_KEY &&
-    !EMAILJS_PUBLIC_KEY.startsWith("INSERISCI")
-  );
+function isConfigured(value) {
+  return !!value && !value.startsWith("INSERISCI");
 }
 
-function sendEmailNotification(templateParams) {
-  if (!emailNotificationsConfigured()) return Promise.resolve();
+function emailNotificationsConfigured() {
+  return isConfigured(EMAILJS_SERVICE_ID) && isConfigured(EMAILJS_TEMPLATE_ID) && isConfigured(EMAILJS_PUBLIC_KEY);
+}
+
+function credentialsEmailConfigured() {
+  return isConfigured(EMAILJS_SERVICE_ID) && isConfigured(EMAILJS_TEMPLATE_ID_CREDENTIALS) && isConfigured(EMAILJS_PUBLIC_KEY);
+}
+
+function sendEmailViaTemplate(templateId, templateParams) {
   return fetch("https://api.emailjs.com/api/v1.0/email/send", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       service_id: EMAILJS_SERVICE_ID,
-      template_id: EMAILJS_TEMPLATE_ID,
+      template_id: templateId,
       user_id: EMAILJS_PUBLIC_KEY,
       template_params: templateParams,
     }),
-  }).catch(() => {
+  });
+}
+
+function sendEmailNotification(templateParams) {
+  if (!emailNotificationsConfigured()) return Promise.resolve();
+  return sendEmailViaTemplate(EMAILJS_TEMPLATE_ID, templateParams).catch(() => {
     // Un'email non riuscita non deve mai bloccare la condivisione dei dati.
   });
+}
+
+/* Invia la password personale appena generata direttamente all'email del
+   cameraman. Restituisce "ok"/"non-configurato"/"errore" così l'interfaccia
+   può dirlo chiaramente al responsabile (la password non si vede più a
+   schermo: esiste solo nella mail che arriva al cameraman). */
+function sendCredentialsEmail(toEmail, toName, password) {
+  if (!credentialsEmailConfigured()) return Promise.resolve("non-configurato");
+  return sendEmailViaTemplate(EMAILJS_TEMPLATE_ID_CREDENTIALS, {
+    to_email: toEmail,
+    to_name: toName,
+    password,
+  })
+    .then(() => "ok")
+    .catch(() => "errore");
 }
 
 function computeEventSignature(ev, itemIds) {
@@ -1222,6 +1246,7 @@ export default function App() {
   const [newItem, setNewItem] = useState({ id: "", name: "", category: "camera" });
   const [newCameraman, setNewCameraman] = useState("");
   const [newCameramanEmail, setNewCameramanEmail] = useState("");
+  const [sendingPasswordForId, setSendingPasswordForId] = useState(null);
   const [expandedCameramanId, setExpandedCameramanId] = useState(null);
   const [toast, setToast] = useState(null);
 
@@ -1830,6 +1855,32 @@ export default function App() {
     return `${word}${num}`;
   }
 
+  /* Genera una nuova password personale per il cameraman e la invia
+     direttamente alla sua email via EmailJS: il responsabile non la vede
+     né la digita mai, quindi non può più sbagliarla o scordarla scritta
+     da qualche parte. Richiede che il cameraman abbia già un'email
+     impostata e che il template "credenziali" di EmailJS sia configurato. */
+  function generateAndSendPassword(c) {
+    if (!c.email || !c.email.trim()) {
+      showToast("Imposta prima un'email per questo cameraman.");
+      return;
+    }
+    const newPassword = generateRandomPassword();
+    setSendingPasswordForId(c.id);
+    sendCredentialsEmail(c.email.trim(), c.name, newPassword)
+      .then((result) => {
+        if (result === "ok") {
+          setCameramanPassword(c.id, newPassword);
+          showToast(`Password generata e inviata a ${c.email}.`);
+        } else if (result === "non-configurato") {
+          showToast("EmailJS non è ancora configurato: la password non è stata generata né inviata.");
+        } else {
+          showToast("Invio email non riuscito: la password non è stata salvata, riprova.");
+        }
+      })
+      .finally(() => setSendingPasswordForId(null));
+  }
+
   function deleteCameraman(id) {
     const theirEvents = events.filter((e) => e.cameramanId === id);
     if (theirEvents.length > 0) {
@@ -2313,27 +2364,28 @@ export default function App() {
                           <label style={{ fontSize: 12.5, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.04em" }}>
                             Password personale di accesso
                           </label>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <input
-                              type="text"
-                              placeholder="nessuna (usa password generica)"
-                              value={c.password || ""}
-                              onChange={(e) => setCameramanPassword(c.id, e.target.value)}
-                              style={{ flex: 1, background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 9px", color: TOKENS.text, fontSize: 15 }}
-                            />
+                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <span style={{ fontSize: 15, color: c.password ? TOKENS.teal : TOKENS.textMute, fontWeight: 600 }}>
+                              {c.password ? "Impostata (inviata via email)" : "Nessuna — usa la password generica"}
+                            </span>
                             <button
                               type="button"
-                              onClick={() => setCameramanPassword(c.id, generateRandomPassword())}
-                              title="Genera una password casuale"
-                              style={{ background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 10px", color: TOKENS.text, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}
+                              disabled={sendingPasswordForId === c.id}
+                              onClick={() => generateAndSendPassword(c)}
+                              title="Genera una nuova password e inviala all'email del cameraman"
+                              style={{
+                                background: TOKENS.amber, color: "#1A1A1A", border: "none", borderRadius: 6, padding: "7px 10px",
+                                fontWeight: 700, fontSize: 13, cursor: sendingPasswordForId === c.id ? "default" : "pointer",
+                                opacity: sendingPasswordForId === c.id ? 0.6 : 1, whiteSpace: "nowrap",
+                              }}
                             >
-                              Genera
+                              {sendingPasswordForId === c.id ? "Invio…" : c.password ? "Rigenera e invia" : "Genera e invia"}
                             </button>
                             {c.password && (
                               <button
                                 type="button"
                                 onClick={() => setCameramanPassword(c.id, "")}
-                                title="Rimuovi password personale"
+                                title="Rimuovi password personale (torna alla password generica)"
                                 style={{ background: "transparent", border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 10px", color: TOKENS.red, fontSize: 13, cursor: "pointer" }}
                               >
                                 Rimuovi
@@ -2342,7 +2394,7 @@ export default function App() {
                           </div>
                           <span style={{ fontSize: 12, color: TOKENS.textMute }}>
                             {c.password
-                              ? `Entrando con questa password si accede direttamente come "${c.name}", senza doverlo selezionare dal menù.`
+                              ? `Il cameraman accede con la password che gli è arrivata via email, direttamente come "${c.name}", senza doverlo selezionare dal menù.`
                               : "Senza password personale, questo cameraman continua a entrare con la password generica e a scegliersi dal menù."}
                           </span>
                         </div>
