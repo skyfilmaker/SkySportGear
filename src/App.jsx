@@ -2317,13 +2317,13 @@ export default function App() {
             <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
               <input placeholder="Nome cameraman" value={newCameraman} onChange={(e) => setNewCameraman(e.target.value)}
                 style={{ background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "8px 10px", color: TOKENS.text, fontSize: 18, width: 220 }} />
-              <input placeholder="Email (opzionale)" type="email" value={newCameramanEmail} onChange={(e) => setNewCameramanEmail(e.target.value)}
+              <input placeholder="Email" type="email" value={newCameramanEmail} onChange={(e) => setNewCameramanEmail(e.target.value)}
                 style={{ background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "8px 10px", color: TOKENS.text, fontSize: 18, width: 240 }} />
               <button onClick={addCameraman} style={{ display: "flex", alignItems: "center", gap: 6, background: TOKENS.amber, color: "#1A1A1A", border: "none", borderRadius: 6, padding: "8px 14px", fontWeight: 700, fontSize: 18, cursor: "pointer" }}>
                 <Plus size={14} /> Aggiungi
               </button>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(290px, 1fr))", gap: 10 }}>
               {cameramen.map((c) => {
                 const theirEvents = events.filter((e) => e.cameramanId === c.id);
                 const expanded = expandedCameramanId === c.id;
@@ -2364,33 +2364,38 @@ export default function App() {
                           <label style={{ fontSize: 12.5, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.04em" }}>
                             Password personale di accesso
                           </label>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <span style={{ fontSize: 15, color: c.password ? TOKENS.teal : TOKENS.textMute, fontWeight: 600 }}>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            <span style={{ fontSize: 14, color: c.password ? TOKENS.teal : TOKENS.textMute, fontWeight: 600 }}>
                               {c.password ? "Impostata (inviata via email)" : "Nessuna — usa la password generica"}
                             </span>
-                            <button
-                              type="button"
-                              disabled={sendingPasswordForId === c.id}
-                              onClick={() => generateAndSendPassword(c)}
-                              title="Genera una nuova password e inviala all'email del cameraman"
-                              style={{
-                                background: TOKENS.amber, color: "#1A1A1A", border: "none", borderRadius: 6, padding: "7px 10px",
-                                fontWeight: 700, fontSize: 13, cursor: sendingPasswordForId === c.id ? "default" : "pointer",
-                                opacity: sendingPasswordForId === c.id ? 0.6 : 1, whiteSpace: "nowrap",
-                              }}
-                            >
-                              {sendingPasswordForId === c.id ? "Invio…" : c.password ? "Rigenera e invia" : "Genera e invia"}
-                            </button>
-                            {c.password && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                               <button
                                 type="button"
-                                onClick={() => setCameramanPassword(c.id, "")}
-                                title="Rimuovi password personale (torna alla password generica)"
-                                style={{ background: "transparent", border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 10px", color: TOKENS.red, fontSize: 13, cursor: "pointer" }}
+                                disabled={sendingPasswordForId === c.id}
+                                onClick={() => generateAndSendPassword(c)}
+                                title="Genera una nuova password e inviala all'email del cameraman"
+                                style={{
+                                  background: TOKENS.amber, color: "#1A1A1A", border: "none", borderRadius: 6, padding: "7px 10px",
+                                  fontWeight: 700, fontSize: 13, cursor: sendingPasswordForId === c.id ? "default" : "pointer",
+                                  opacity: sendingPasswordForId === c.id ? 0.6 : 1, whiteSpace: "nowrap", flexShrink: 0,
+                                }}
                               >
-                                Rimuovi
+                                {sendingPasswordForId === c.id ? "Invio…" : c.password ? "Rigenera e invia" : "Genera e invia"}
                               </button>
-                            )}
+                              {c.password && (
+                                <button
+                                  type="button"
+                                  onClick={() => setCameramanPassword(c.id, "")}
+                                  title="Rimuovi password personale: il cameraman torna a usare la password generica e a scegliersi dal menù, invece di entrare già identificato"
+                                  style={{
+                                    background: "transparent", border: `1px solid ${TOKENS.red}`, borderRadius: 6, padding: "7px 10px",
+                                    color: TOKENS.red, fontSize: 13, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
+                                  }}
+                                >
+                                  Rimuovi
+                                </button>
+                              )}
+                            </div>
                           </div>
                           <span style={{ fontSize: 12, color: TOKENS.textMute }}>
                             {c.password
