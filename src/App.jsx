@@ -143,6 +143,38 @@ function formatEventWhen(ev) {
   return `${ev.fromDate}${ev.fromTime ? ` ${ev.fromTime}` : ""} → ${ev.toDate}${ev.toTime ? ` ${ev.toTime}` : ""}`;
 }
 
+/* ---------------------------------------------------------
+   HELPER — link "Aggiungi al calendario" (Google / Outlook)
+--------------------------------------------------------- */
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function formatForGoogleCal(d) {
+  return (
+    `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}` +
+    `T${pad2(d.getHours())}${pad2(d.getMinutes())}00`
+  );
+}
+function formatForOutlookCal(d) {
+  return (
+    `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` +
+    `T${pad2(d.getHours())}:${pad2(d.getMinutes())}:00`
+  );
+}
+function buildCalendarLinks(event, materialText) {
+  const r = eventRange(event);
+  if (!r.from || !r.to) return { googleUrl: "", outlookUrl: "" };
+  const details = `Materiale assegnato: ${materialText || "nessuno"}`;
+  const googleUrl =
+    `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(event.name)}` +
+    `&dates=${formatForGoogleCal(r.from)}/${formatForGoogleCal(r.to)}&details=${encodeURIComponent(details)}`;
+  const outlookUrl =
+    `https://outlook.live.com/calendar/0/deeplink/compose?subject=${encodeURIComponent(event.name)}` +
+    `&startdt=${encodeURIComponent(formatForOutlookCal(r.from))}&enddt=${encodeURIComponent(formatForOutlookCal(r.to))}` +
+    `&body=${encodeURIComponent(details)}`;
+  return { googleUrl, outlookUrl };
+}
+
 function dateOnly(d) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
@@ -451,13 +483,17 @@ function GearTag({ item, status }) {
 const RESPONSABILE_PASSWORD = "sky-responsabile-2026";
 const CAMERAMAN_PASSWORD = "sky-cameraman-2026";
 
-function LoginScreen({ onLogin }) {
+function LoginScreen({ onLogin, cameramen }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
 
   function handleSubmit(e) {
     e.preventDefault();
+    const individualMatch = (cameramen || []).find(
+      (c) => c.password && c.password === password
+    );
     if (password === RESPONSABILE_PASSWORD) onLogin("responsabile");
+    else if (individualMatch) onLogin("cameraman", individualMatch.id);
     else if (password === CAMERAMAN_PASSWORD) onLogin("cameraman");
     else setError("Password non corretta.");
   }
@@ -492,7 +528,7 @@ function LoginScreen({ onLogin }) {
   );
 }
 
-function RoleSwitcher({ role, onLogout, cameramanId, setCameramanId, cameramen }) {
+function RoleSwitcher({ role, onLogout, cameramanId, setCameramanId, cameramen, locked }) {
   return (
     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
       <div
@@ -503,7 +539,19 @@ function RoleSwitcher({ role, onLogout, cameramanId, setCameramanId, cameramen }
       >
         {role}
       </div>
-      {role === "cameraman" && cameramen.length > 0 && (
+      {role === "cameraman" && locked && (
+        <div
+          title="Sei entrato con la tua password personale: identità fissata, non modificabile dal menù."
+          style={{
+            display: "flex", alignItems: "center", gap: 6, background: TOKENS.panelRaised, color: TOKENS.text,
+            border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 10px", fontSize: 18,
+          }}
+        >
+          <Lock size={13} color={TOKENS.textMute} />
+          {cameramen.find((c) => c.id === cameramanId)?.name || "Cameraman"}
+        </div>
+      )}
+      {role === "cameraman" && !locked && cameramen.length > 0 && (
         <div style={{ position: "relative" }}>
           <select
             value={cameramanId}
@@ -860,6 +908,68 @@ const PRESENCE_STALE_MS = 45000; // dopo quanto una sessione senza segnale non v
 const PRESENCE_CLEANUP_MS = 5 * 60 * 1000; // dopo quanto una voce "morta" viene ripulita dal database
 
 /* ---------------------------------------------------------
+   NOTIFICHE EMAIL (EmailJS) — per attivarle, crea un account gratuito su
+   https://www.emailjs.com, crea un "Email Service" e un "Email Template"
+   con le variabili {{to_email}}, {{to_name}}, {{event_name}}, {{event_when}},
+   {{material_list}}, {{google_calendar_link}}, {{outlook_calendar_link}},
+   poi sostituisci i tre valori sotto con quelli reali del tuo account, e
+   RESPONSABILE_NOTIFICATION_EMAIL con l'indirizzo email fisso a cui inviare
+   il riepilogo delle modifiche condivise. Finché restano "INSERISCI_...",
+   l'invio delle email viene semplicemente saltato (nessun errore visibile).
+--------------------------------------------------------- */
+const EMAILJS_SERVICE_ID = "INSERISCI_SERVICE_ID";
+const EMAILJS_TEMPLATE_ID = "INSERISCI_TEMPLATE_ID";
+const EMAILJS_PUBLIC_KEY = "INSERISCI_PUBLIC_KEY";
+const RESPONSABILE_NOTIFICATION_EMAIL = "INSERISCI_EMAIL_RESPONSABILE";
+
+function emailNotificationsConfigured() {
+  return (
+    EMAILJS_SERVICE_ID &&
+    !EMAILJS_SERVICE_ID.startsWith("INSERISCI") &&
+    EMAILJS_TEMPLATE_ID &&
+    !EMAILJS_TEMPLATE_ID.startsWith("INSERISCI") &&
+    EMAILJS_PUBLIC_KEY &&
+    !EMAILJS_PUBLIC_KEY.startsWith("INSERISCI")
+  );
+}
+
+function sendEmailNotification(templateParams) {
+  if (!emailNotificationsConfigured()) return Promise.resolve();
+  return fetch("https://api.emailjs.com/api/v1.0/email/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      service_id: EMAILJS_SERVICE_ID,
+      template_id: EMAILJS_TEMPLATE_ID,
+      user_id: EMAILJS_PUBLIC_KEY,
+      template_params: templateParams,
+    }),
+  }).catch(() => {
+    // Un'email non riuscita non deve mai bloccare la condivisione dei dati.
+  });
+}
+
+function computeEventSignature(ev, itemIds) {
+  return JSON.stringify({
+    name: ev.name,
+    fromDate: ev.fromDate,
+    fromTime: ev.fromTime,
+    toDate: ev.toDate,
+    toTime: ev.toTime,
+    cameramanId: ev.cameramanId,
+    items: [...itemIds].sort(),
+  });
+}
+function buildEventSignatures(eventsArr, assignmentsArr) {
+  const map = new Map();
+  eventsArr.forEach((ev) => {
+    const evItems = assignmentsArr.filter((a) => a.eventId === ev.id).map((a) => a.itemId);
+    map.set(ev.id, computeEventSignature(ev, evItems));
+  });
+  return map;
+}
+
+/* ---------------------------------------------------------
    AUTENTICAZIONE ANONIMA FIREBASE — invisibile all'utente: l'app si
    "presenta" da sola a Firebase con un token, così le regole del database
    possono richiedere "auth != null" e bloccare chi tenta di leggere/
@@ -975,8 +1085,44 @@ export default function App() {
     } catch {}
   }, [authRole]);
   const role = authRole;
+
+  /* Quando un cameraman entra con la SUA password personale, questo viene
+     fissato al suo id: niente più menù per "travestirsi" da un altro
+     cameraman, e le sue azioni (modificare/cancellare eventi) si limitano
+     ai soli eventi assegnati a lui. Chi entra ancora con la password
+     generica non ha questo blocco e continua a scegliersi dal menù come
+     prima. Persistito, così riaprendo il browser non si perde l'identità. */
+  const [lockedCameramanId, setLockedCameramanId] = useState(() => {
+    try { return window.localStorage.getItem("skysportgear_locked_cameraman_id") || null; } catch { return null; }
+  });
+  useEffect(() => {
+    try {
+      if (lockedCameramanId) window.localStorage.setItem("skysportgear_locked_cameraman_id", lockedCameramanId);
+      else window.localStorage.removeItem("skysportgear_locked_cameraman_id");
+    } catch {}
+  }, [lockedCameramanId]);
+
   function handleLogout() {
     setAuthRole(null);
+    setLockedCameramanId(null);
+  }
+  function handleLogin(newRole, matchedCameramanId) {
+    setAuthRole(newRole);
+    if (matchedCameramanId) {
+      setLockedCameramanId(matchedCameramanId);
+      setCameramanId(matchedCameramanId);
+    } else {
+      setLockedCameramanId(null);
+    }
+  }
+
+  /* Tiene traccia dell'ultima "fotografia" di ogni evento (nome, date,
+     cameraman, materiale) così dopo una condivisione si può capire quali
+     eventi sono davvero cambiati e mandare una notifica email solo per
+     quelli, non per ogni condivisione. */
+  const lastEventSignaturesRef = useRef(null);
+  if (lastEventSignaturesRef.current === null) {
+    lastEventSignaturesRef.current = buildEventSignatures(events, assignments);
   }
 
   const sessionIdRef = useRef(null);
@@ -1046,7 +1192,7 @@ export default function App() {
     };
   }, [role]);
 
-  const [cameramanId, setCameramanId] = useState("");
+  const [cameramanId, setCameramanId] = useState(() => lockedCameramanId || "");
 
   /* Ogni volta che l'elenco cameramen cambia (es. dopo il caricamento dei
      dati condivisi da Firebase, che sostituisce quelli di esempio), se il
@@ -1055,10 +1201,13 @@ export default function App() {
      di lasciarlo agganciato a un ID ormai inesistente — altrimenti il menu
      a tendina mostra visivamente il primo nome della lista pur avendo
      internamente un ID non valido, e gli eventi creati in quello stato
-     risultano "senza cameraman assegnato". */
+     risultano "senza cameraman assegnato". Se era un'identità "fissata"
+     da una password personale ormai rimossa/cancellata, si rimuove anche
+     il blocco, così la persona può tornare a scegliersi dal menù. */
   useEffect(() => {
     if (cameramanId && !cameramen.some((c) => c.id === cameramanId)) {
       setCameramanId("");
+      setLockedCameramanId(null);
     }
   }, [cameramen, cameramanId]);
   const [tab, setTab] = useState("dashboard");
@@ -1072,6 +1221,7 @@ export default function App() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [newItem, setNewItem] = useState({ id: "", name: "", category: "camera" });
   const [newCameraman, setNewCameraman] = useState("");
+  const [newCameramanEmail, setNewCameramanEmail] = useState("");
   const [expandedCameramanId, setExpandedCameramanId] = useState(null);
   const [toast, setToast] = useState(null);
 
@@ -1261,6 +1411,7 @@ export default function App() {
         setEvents(n.events);
         setAssignments(n.assignments);
         setConflictEventIds(new Set());
+        lastEventSignaturesRef.current = buildEventSignatures(n.events, n.assignments);
         setSyncStatus("pronto");
         setLastSyncAt(new Date());
         showToast("Dati condivisi caricati.");
@@ -1313,6 +1464,7 @@ export default function App() {
           setSyncStatus("pronto");
           setLastSyncAt(new Date());
           showToast("Modifiche condivise con tutti.");
+          notifyChangedEvents();
         });
       })
       .catch(() => {
@@ -1321,6 +1473,56 @@ export default function App() {
       });
   }
 
+  /* Confronta gli eventi attuali con l'ultima "fotografia" nota e manda
+     un'email (via EmailJS) solo per quelli davvero nuovi o modificati:
+     al cameraman coinvolto (se ha un'email impostata) e, in riepilogo,
+     all'indirizzo fisso del responsabile. Se EmailJS non è configurato
+     (valori "INSERISCI_..."), sendEmailNotification non fa nulla. */
+  function notifyChangedEvents() {
+    const prevSignatures = lastEventSignaturesRef.current || new Map();
+    const changed = events.filter((ev) => {
+      const evItems = assignments.filter((a) => a.eventId === ev.id).map((a) => a.itemId);
+      const sig = computeEventSignature(ev, evItems);
+      return prevSignatures.get(ev.id) !== sig;
+    });
+    lastEventSignaturesRef.current = buildEventSignatures(events, assignments);
+    if (changed.length === 0) return;
+
+    changed.forEach((ev) => {
+      const cam = cameramen.find((c) => c.id === ev.cameramanId);
+      if (!cam || !cam.email) return;
+      const evItems = assignments
+        .filter((a) => a.eventId === ev.id)
+        .map((a) => items.find((i) => i.id === a.itemId))
+        .filter(Boolean);
+      const materialText = evItems.map((i) => `${i.id} ${i.name}`).join(", ") || "Nessuno";
+      const { googleUrl, outlookUrl } = buildCalendarLinks(ev, materialText);
+      sendEmailNotification({
+        to_email: cam.email,
+        to_name: cam.name,
+        event_name: ev.name,
+        event_when: formatEventWhen(ev),
+        material_list: materialText,
+        google_calendar_link: googleUrl,
+        outlook_calendar_link: outlookUrl,
+      });
+    });
+
+    if (RESPONSABILE_NOTIFICATION_EMAIL && !RESPONSABILE_NOTIFICATION_EMAIL.startsWith("INSERISCI")) {
+      const summary = changed
+        .map((ev) => `${ev.name} (${cameramanName(ev.cameramanId) || "nessun cameraman"}) — ${formatEventWhen(ev)}`)
+        .join("\n");
+      sendEmailNotification({
+        to_email: RESPONSABILE_NOTIFICATION_EMAIL,
+        to_name: "Responsabile",
+        event_name: "Riepilogo modifiche condivise",
+        event_when: new Date().toLocaleString("it-IT"),
+        material_list: summary,
+        google_calendar_link: "",
+        outlook_calendar_link: "",
+      });
+    }
+  }
 
   function showToast(msg) {
     setToast(msg);
@@ -1561,9 +1763,28 @@ export default function App() {
 
   function addCameraman() {
     if (!newCameraman.trim()) return;
-    setCameramen((prev) => [...prev, { id: uid("cm"), name: newCameraman.trim() }]);
+    setCameramen((prev) => [
+      ...prev,
+      { id: uid("cm"), name: newCameraman.trim(), email: newCameramanEmail.trim(), password: "" },
+    ]);
     setNewCameraman("");
+    setNewCameramanEmail("");
     showToast("Cameraman aggiunto.");
+  }
+
+  function setCameramanEmail(id, email) {
+    setCameramen((prev) => prev.map((c) => (c.id === id ? { ...c, email } : c)));
+  }
+
+  function setCameramanPassword(id, password) {
+    setCameramen((prev) => prev.map((c) => (c.id === id ? { ...c, password } : c)));
+  }
+
+  function generateRandomPassword() {
+    const words = ["aquila", "tigre", "faro", "onda", "monte", "stella", "falco", "vento", "sole", "luna"];
+    const word = words[Math.floor(Math.random() * words.length)];
+    const num = Math.floor(100 + Math.random() * 900);
+    return `${word}${num}`;
   }
 
   function deleteCameraman(id) {
@@ -1589,7 +1810,7 @@ export default function App() {
   const myEvents = events.filter((e) => e.cameramanId === cameramanId);
 
   if (!role) {
-    return <LoginScreen onLogin={setAuthRole} />;
+    return <LoginScreen onLogin={handleLogin} cameramen={cameramen} />;
   }
 
   const NAV = [
@@ -1671,7 +1892,7 @@ export default function App() {
               {role === "cameraman" ? `Visualizzazione come ${cameramanName(cameramanId)}` : `Visualizzazione: ${role}`}
             </div>
           </div>
-          <RoleSwitcher role={role} onLogout={handleLogout} cameramanId={cameramanId} setCameramanId={setCameramanId} cameramen={cameramen} />
+          <RoleSwitcher role={role} onLogout={handleLogout} cameramanId={cameramanId} setCameramanId={setCameramanId} cameramen={cameramen} locked={!!lockedCameramanId} />
         </div>
 
         {/* ---------------- DASHBOARD ---------------- */}
@@ -1999,14 +2220,16 @@ export default function App() {
         {/* ---------------- CAMERAMEN ---------------- */}
         {activeTab === "cameramen" && role === "responsabile" && (
           <div>
-            <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
               <input placeholder="Nome cameraman" value={newCameraman} onChange={(e) => setNewCameraman(e.target.value)}
                 style={{ background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "8px 10px", color: TOKENS.text, fontSize: 18, width: 220 }} />
+              <input placeholder="Email (opzionale)" type="email" value={newCameramanEmail} onChange={(e) => setNewCameramanEmail(e.target.value)}
+                style={{ background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "8px 10px", color: TOKENS.text, fontSize: 18, width: 240 }} />
               <button onClick={addCameraman} style={{ display: "flex", alignItems: "center", gap: 6, background: TOKENS.amber, color: "#1A1A1A", border: "none", borderRadius: 6, padding: "8px 14px", fontWeight: 700, fontSize: 18, cursor: "pointer" }}>
                 <Plus size={14} /> Aggiungi
               </button>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 10 }}>
               {cameramen.map((c) => {
                 const theirEvents = events.filter((e) => e.cameramanId === c.id);
                 const expanded = expandedCameramanId === c.id;
@@ -2032,24 +2255,74 @@ export default function App() {
                       </button>
                     </div>
                     {expanded && (
-                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${TOKENS.line}`, display: "flex", flexDirection: "column", gap: 6 }}>
-                        {theirEvents.length === 0 && <span style={{ fontSize: 14, color: TOKENS.textMute }}>Nessun evento assegnato.</span>}
-                        {theirEvents.map((ev) => {
-                          const evR = eventRange(ev);
-                          const now = new Date();
-                          const isActiveNow = evR.from && evR.to && evR.from <= now && now <= evR.to;
-                          const evColor = getEventColor(ev.id);
-                          return (
-                            <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14 }}>
-                              <div style={{ width: 8, height: 8, borderRadius: 2, background: evColor, flexShrink: 0 }} />
-                              <span style={{ flex: 1, color: TOKENS.text }}>{ev.name}</span>
-                              <span style={{ color: TOKENS.textMute, fontSize: 12.5 }}>{formatEventWhen(ev)}</span>
-                              {isActiveNow && (
-                                <span style={{ fontSize: 11, fontWeight: 700, color: TOKENS.teal, textTransform: "uppercase" }}>Attivo</span>
-                              )}
-                            </div>
-                          );
-                        })}
+                      <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${TOKENS.line}`, display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <label style={{ fontSize: 12.5, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.04em" }}>Email</label>
+                          <input
+                            type="email"
+                            placeholder="email@esempio.it"
+                            value={c.email || ""}
+                            onChange={(e) => setCameramanEmail(c.id, e.target.value)}
+                            style={{ background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 9px", color: TOKENS.text, fontSize: 15 }}
+                          />
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          <label style={{ fontSize: 12.5, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                            Password personale di accesso
+                          </label>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <input
+                              type="text"
+                              placeholder="nessuna (usa password generica)"
+                              value={c.password || ""}
+                              onChange={(e) => setCameramanPassword(c.id, e.target.value)}
+                              style={{ flex: 1, background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 9px", color: TOKENS.text, fontSize: 15 }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setCameramanPassword(c.id, generateRandomPassword())}
+                              title="Genera una password casuale"
+                              style={{ background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 10px", color: TOKENS.text, fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}
+                            >
+                              Genera
+                            </button>
+                            {c.password && (
+                              <button
+                                type="button"
+                                onClick={() => setCameramanPassword(c.id, "")}
+                                title="Rimuovi password personale"
+                                style={{ background: "transparent", border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 10px", color: TOKENS.red, fontSize: 13, cursor: "pointer" }}
+                              >
+                                Rimuovi
+                              </button>
+                            )}
+                          </div>
+                          <span style={{ fontSize: 12, color: TOKENS.textMute }}>
+                            {c.password
+                              ? `Entrando con questa password si accede direttamente come "${c.name}", senza doverlo selezionare dal menù.`
+                              : "Senza password personale, questo cameraman continua a entrare con la password generica e a scegliersi dal menù."}
+                          </span>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: TOKENS.textMute, marginBottom: 4 }}>Eventi assegnati</div>
+                          {theirEvents.length === 0 && <span style={{ fontSize: 14, color: TOKENS.textMute }}>Nessun evento assegnato.</span>}
+                          {theirEvents.map((ev) => {
+                            const evR = eventRange(ev);
+                            const now = new Date();
+                            const isActiveNow = evR.from && evR.to && evR.from <= now && now <= evR.to;
+                            const evColor = getEventColor(ev.id);
+                            return (
+                              <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14 }}>
+                                <div style={{ width: 8, height: 8, borderRadius: 2, background: evColor, flexShrink: 0 }} />
+                                <span style={{ flex: 1, color: TOKENS.text }}>{ev.name}</span>
+                                <span style={{ color: TOKENS.textMute, fontSize: 12.5 }}>{formatEventWhen(ev)}</span>
+                                {isActiveNow && (
+                                  <span style={{ fontSize: 11, fontWeight: 700, color: TOKENS.teal, textTransform: "uppercase" }}>Attivo</span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
                     )}
                   </div>
