@@ -1372,26 +1372,69 @@ export default function App() {
 
   /* Cancella automaticamente gli eventi la cui data/ora di fine è passata
      (e le relative assegnazioni, liberando il materiale). Controlla subito
-     al caricamento e poi ogni minuto. Come ogni altra modifica, questa
-     pulizia avviene in locale: per farla vedere agli altri serve comunque
-     premere "Condividi le mie modifiche", coerentemente con il resto
-     dell'app che non sincronizza mai nulla in automatico. */
+     al caricamento e poi ogni minuto, sia in locale (così la vista corrente
+     si aggiorna subito anche offline) sia sul database condiviso: un evento
+     scaduto è scaduto per tutti, senza possibilità di conflitto, quindi
+     questa pulizia — a differenza di qualunque altra modifica — viene
+     anche inviata da sola, senza bisogno di premere "Condividi le mie
+     modifiche". Non tocca né sovrascrive altre modifiche in corso: legge
+     la versione condivisa più recente, toglie solo gli eventi ormai finiti
+     e la ri-salva, lasciando intatto tutto il resto (materiale, cameramen,
+     eventi ancora validi). */
   useEffect(() => {
-    function removeExpiredEvents() {
+    function removeExpired(list) {
+      const now = new Date();
+      const stillValid = list.filter((ev) => {
+        const r = eventRange(ev);
+        return !(r.to && r.to < now);
+      });
+      return { stillValid, changed: stillValid.length !== list.length };
+    }
+
+    function removeExpiredLocal() {
       setEvents((prevEvents) => {
-        const now = new Date();
-        const stillValid = prevEvents.filter((ev) => {
-          const r = eventRange(ev);
-          return !(r.to && r.to < now);
-        });
-        if (stillValid.length === prevEvents.length) return prevEvents;
+        const { stillValid, changed } = removeExpired(prevEvents);
+        if (!changed) return prevEvents;
         const validIds = new Set(stillValid.map((e) => e.id));
         setAssignments((prevAssignments) => prevAssignments.filter((a) => validIds.has(a.eventId)));
         return stillValid;
       });
     }
-    removeExpiredEvents();
-    const interval = setInterval(removeExpiredEvents, 60 * 1000);
+
+    function removeExpiredRemote() {
+      let authToken = null;
+      getValidAuthToken()
+        .then((token) => { authToken = token; return fetch(withAuth(FIREBASE_DATA_URL, token)); })
+        .then((res) => res.json())
+        .then((remoteRaw) => {
+          const remote = normalizeRemote(remoteRaw);
+          const { stillValid, changed } = removeExpired(remote.events);
+          if (!changed) return;
+          const validIds = new Set(stillValid.map((e) => e.id));
+          const trimmedAssignments = remote.assignments.filter((a) => validIds.has(a.eventId));
+          return fetch(withAuth(FIREBASE_DATA_URL, authToken), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              items: remote.items,
+              cameramen: remote.cameramen,
+              events: stillValid,
+              assignments: trimmedAssignments,
+            }),
+          });
+        })
+        .catch(() => {
+          // Nessuna connessione o nessun dato condiviso ancora: la pulizia
+          // locale resta comunque valida, si riprova al giro successivo.
+        });
+    }
+
+    removeExpiredLocal();
+    removeExpiredRemote();
+    const interval = setInterval(() => {
+      removeExpiredLocal();
+      removeExpiredRemote();
+    }, 60 * 1000);
     return () => clearInterval(interval);
   }, []);
 
