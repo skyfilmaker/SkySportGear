@@ -4,7 +4,7 @@ import {
   Camera, Mic, Lightbulb, Plus, X, Check, AlertTriangle,
   Package, Users, ClipboardList, LayoutGrid, ChevronDown,
   Trash2, Calendar, Clock, Search, Folder, CalendarDays,
-  Battery, Triangle, Joystick, Aperture, Rows3, StickyNote, Pencil, Lock, Unlock, Filter, ChevronRight
+  Battery, Triangle, Joystick, Aperture, Rows3, StickyNote, Pencil, Lock, Unlock, Filter, ChevronRight, Archive
 } from "lucide-react";
 
 const MESI_IT = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"];
@@ -135,6 +135,62 @@ function rangesOverlap(aFrom, aTo, bFrom, bTo) {
   if (!aFrom || !aTo || !bFrom || !bTo) return false;
   return aFrom <= bTo && bFrom <= aTo;
 }
+
+/* "Fotografa" un evento in scadenza con tutto ciò che serve per leggerlo e
+   farci statistiche in futuro, anche se il materiale o il cameraman
+   vengono poi cancellati dall'elenco corrente (i nomi restano scritti qui,
+   non solo gli id). */
+function buildArchiveRecord(ev, assignmentsList, itemsList, cameramenList) {
+  const evItems = assignmentsList
+    .filter((a) => a.eventId === ev.id)
+    .map((a) => {
+      const it = itemsList.find((i) => i.id === a.itemId);
+      return { itemId: a.itemId, itemName: it?.name || a.itemId, itemCategory: it?.category || "vario" };
+    });
+  const r = eventRange(ev);
+  const durationHours = r.from && r.to ? Math.max(0, (r.to - r.from) / 3600000) : 0;
+  return {
+    id: ev.id,
+    name: ev.name,
+    cameramanId: ev.cameramanId || null,
+    cameramanName: cameramenList.find((c) => c.id === ev.cameramanId)?.name || "Nessun cameraman",
+    fromDate: ev.fromDate,
+    fromTime: ev.fromTime,
+    toDate: ev.toDate,
+    toTime: ev.toTime,
+    durationHours,
+    items: evItems,
+    archivedAt: Date.now(),
+  };
+}
+
+/* Statistiche calcolate sullo storico: quanto è stato impegnato ogni pezzo
+   di materiale (ore totali e numero di utilizzi) e quante ore ha lavorato
+   ciascun cameraman, sommando la durata degli eventi archiviati. */
+function computeMaterialStats(archivedEventsList) {
+  const map = new Map();
+  archivedEventsList.forEach((ev) => {
+    ev.items.forEach((it) => {
+      const cur = map.get(it.itemId) || { itemId: it.itemId, itemName: it.itemName, hours: 0, uses: 0 };
+      cur.hours += ev.durationHours;
+      cur.uses += 1;
+      map.set(it.itemId, cur);
+    });
+  });
+  return Array.from(map.values()).sort((a, b) => b.hours - a.hours);
+}
+function computeCameramanStats(archivedEventsList) {
+  const map = new Map();
+  archivedEventsList.forEach((ev) => {
+    const key = ev.cameramanName || "Nessun cameraman";
+    const cur = map.get(key) || { name: key, hours: 0, events: 0 };
+    cur.hours += ev.durationHours;
+    cur.events += 1;
+    map.set(key, cur);
+  });
+  return Array.from(map.values()).sort((a, b) => b.hours - a.hours);
+}
+
 function formatEventWhen(ev) {
   const sameDay = ev.toDate === ev.fromDate || !ev.toDate;
   if (sameDay) {
@@ -173,6 +229,59 @@ function buildCalendarLinks(event, materialText) {
     `&startdt=${encodeURIComponent(formatForOutlookCal(r.from))}&enddt=${encodeURIComponent(formatForOutlookCal(r.to))}` +
     `&body=${encodeURIComponent(details)}`;
   return { googleUrl, outlookUrl };
+}
+
+/* ---------------------------------------------------------
+   HELPER — esportazione .ics (tutti gli eventi di un cameraman in un
+   colpo solo, da importare in blocco in un qualunque calendario)
+--------------------------------------------------------- */
+function formatForICS(d) {
+  return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}T${pad2(d.getHours())}${pad2(d.getMinutes())}00`;
+}
+function escapeICSText(s) {
+  return String(s).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+}
+function buildICS(eventsList, assignmentsList, itemsList, calendarName) {
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//SkySportGear//IT",
+    "CALSCALE:GREGORIAN",
+    `X-WR-CALNAME:${escapeICSText(calendarName || "SkySportGear")}`,
+  ];
+  eventsList.forEach((ev) => {
+    const r = eventRange(ev);
+    if (!r.from || !r.to) return;
+    const evItems = assignmentsList
+      .filter((a) => a.eventId === ev.id)
+      .map((a) => {
+        const it = itemsList.find((i) => i.id === a.itemId);
+        return it ? `${it.id} ${it.name}` : a.itemId;
+      });
+    lines.push(
+      "BEGIN:VEVENT",
+      `UID:${ev.id}@skysportgear`,
+      `DTSTAMP:${formatForICS(new Date())}`,
+      `DTSTART:${formatForICS(r.from)}`,
+      `DTEND:${formatForICS(r.to)}`,
+      `SUMMARY:${escapeICSText(ev.name)}`,
+      `DESCRIPTION:${escapeICSText(`Materiale: ${evItems.join(", ") || "Nessuno"}`)}`,
+      "END:VEVENT"
+    );
+  });
+  lines.push("END:VCALENDAR");
+  return lines.join("\r\n");
+}
+function downloadTextFile(filename, content, mime) {
+  const blob = new Blob([content], { type: mime || "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function dateOnly(d) {
@@ -993,6 +1102,16 @@ function buildEventSignatures(eventsArr, assignmentsArr) {
   return map;
 }
 
+/* Unisce due elenchi "solo in aggiunta" (storico eventi, registro
+   modifiche) eliminando i duplicati per id: serve quando si condivide,
+   per non perdere voci che nel frattempo qualcun altro ha già inviato. */
+function mergeById(listA, listB) {
+  const map = new Map();
+  listA.forEach((x) => map.set(x.id, x));
+  listB.forEach((x) => map.set(x.id, x));
+  return Array.from(map.values());
+}
+
 /* ---------------------------------------------------------
    AUTENTICAZIONE ANONIMA FIREBASE — invisibile all'utente: l'app si
    "presenta" da sola a Firebase con un token, così le regole del database
@@ -1098,6 +1217,18 @@ export default function App() {
   const [cameramen, setCameramen] = usePersistentState("skysportgear_cameramen", INITIAL_CAMERAMEN);
   const [events, setEvents] = usePersistentState("skysportgear_events", INITIAL_EVENTS);
   const [assignments, setAssignments] = usePersistentState("skysportgear_assignments", INITIAL_ASSIGNMENTS);
+  /* Eventi finiti: invece di cancellarli, vengono "fotografati" qui (nome,
+     cameraman e materiale al momento dell'archiviazione, così restano
+     leggibili anche se quel materiale o quel cameraman vengono poi
+     eliminati) per poter consultare uno storico e calcolare statistiche
+     d'uso. */
+  const [archivedEvents, setArchivedEvents] = usePersistentState("skysportgear_archived_events", []);
+  /* Registro delle modifiche fatte in app: chi (ruolo/cameraman), cosa, e
+     quando. Serve a ricostruire a posteriori cosa è successo in caso di
+     dubbi o conflitti. Viene tagliato a un numero massimo di voci per non
+     far crescere il database all'infinito. */
+  const [changelog, setChangelog] = usePersistentState("skysportgear_changelog", []);
+  const MAX_CHANGELOG_ENTRIES = 500;
 
   const [authRole, setAuthRole] = useState(() => {
     try { return window.localStorage.getItem("skysportgear_auth_role") || null; } catch { return null; }
@@ -1153,6 +1284,19 @@ export default function App() {
   if (!sessionIdRef.current) {
     sessionIdRef.current = "s-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
   }
+
+  /* Copie sempre aggiornate di items/cameramen/events/assignments, lette
+     dentro il timer di pulizia degli eventi scaduti: quell'effetto parte
+     una sola volta (per non ripetere la chiamata a Firebase a ogni singola
+     modifica) e userebbe altrimenti dati "congelati" al primo avvio. */
+  const itemsRef = useRef(items);
+  useEffect(() => { itemsRef.current = items; }, [items]);
+  const cameramenRef = useRef(cameramen);
+  useEffect(() => { cameramenRef.current = cameramen; }, [cameramen]);
+  const eventsRef = useRef(events);
+  useEffect(() => { eventsRef.current = events; }, [events]);
+  const assignmentsRef = useRef(assignments);
+  useEffect(() => { assignmentsRef.current = assignments; }, [assignments]);
   const [presenceCounts, setPresenceCounts] = useState({ responsabile: 0, cameraman: 0 });
 
   /* Finché si è autenticati, invia periodicamente un "battito" con il
@@ -1248,6 +1392,7 @@ export default function App() {
   const [newCameramanEmail, setNewCameramanEmail] = useState("");
   const [sendingPasswordForId, setSendingPasswordForId] = useState(null);
   const [expandedCameramanId, setExpandedCameramanId] = useState(null);
+  const [storicoView, setStoricoView] = useState("eventi");
   const [toast, setToast] = useState(null);
 
   const emptyEventForm = { mode: "new", eventId: "", name: "", cameramanId: "", fromDate: "", fromTime: "", toDate: "", toTime: "", itemId: "" };
@@ -1296,6 +1441,8 @@ export default function App() {
       cameramen: remote?.cameramen || [],
       events: remote?.events || [],
       assignments: remote?.assignments || [],
+      archivedEvents: remote?.archivedEvents || [],
+      changelog: remote?.changelog || [],
     };
   }
 
@@ -1395,35 +1542,48 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* Cancella automaticamente gli eventi la cui data/ora di fine è passata
-     (e le relative assegnazioni, liberando il materiale). Controlla subito
-     al caricamento e poi ogni minuto, sia in locale (così la vista corrente
-     si aggiorna subito anche offline) sia sul database condiviso: un evento
-     scaduto è scaduto per tutti, senza possibilità di conflitto, quindi
-     questa pulizia — a differenza di qualunque altra modifica — viene
-     anche inviata da sola, senza bisogno di premere "Condividi le mie
-     modifiche". Non tocca né sovrascrive altre modifiche in corso: legge
-     la versione condivisa più recente, toglie solo gli eventi ormai finiti
-     e la ri-salva, lasciando intatto tutto il resto (materiale, cameramen,
-     eventi ancora validi). */
+  /* Archivia automaticamente gli eventi la cui data/ora di fine è passata
+     (e libera le relative assegnazioni), invece di cancellarli: restano
+     consultabili nel tab "Storico" con tutti i dettagli (materiale,
+     cameraman, durata) anche se quel materiale o quel cameraman vengono
+     poi eliminati. Controlla subito al caricamento e poi ogni minuto, sia
+     in locale (così la vista corrente si aggiorna subito anche offline)
+     sia sul database condiviso: un evento scaduto è scaduto per tutti,
+     senza possibilità di conflitto, quindi questa pulizia — a differenza
+     di qualunque altra modifica — viene anche inviata da sola, senza
+     bisogno di premere "Condividi le mie modifiche". Non tocca né
+     sovrascrive altre modifiche in corso: legge la versione condivisa più
+     recente, archivia solo gli eventi ormai finiti e la ri-salva,
+     lasciando intatto tutto il resto. */
   useEffect(() => {
-    function removeExpired(list) {
+    function splitExpired(list) {
       const now = new Date();
-      const stillValid = list.filter((ev) => {
+      const expired = [];
+      const stillValid = [];
+      list.forEach((ev) => {
         const r = eventRange(ev);
-        return !(r.to && r.to < now);
+        if (r.to && r.to < now) expired.push(ev);
+        else stillValid.push(ev);
       });
-      return { stillValid, changed: stillValid.length !== list.length };
+      return { stillValid, expired };
     }
 
     function removeExpiredLocal() {
-      setEvents((prevEvents) => {
-        const { stillValid, changed } = removeExpired(prevEvents);
-        if (!changed) return prevEvents;
-        const validIds = new Set(stillValid.map((e) => e.id));
-        setAssignments((prevAssignments) => prevAssignments.filter((a) => validIds.has(a.eventId)));
-        return stillValid;
-      });
+      const { stillValid, expired } = splitExpired(eventsRef.current);
+      if (expired.length === 0) return;
+      const validIds = new Set(stillValid.map((e) => e.id));
+      const currentAssignments = assignmentsRef.current;
+      const archiveRecords = expired.map((ev) =>
+        buildArchiveRecord(ev, currentAssignments, itemsRef.current, cameramenRef.current)
+      );
+      setEvents(stillValid);
+      setAssignments(currentAssignments.filter((a) => validIds.has(a.eventId)));
+      setArchivedEvents((prev) => [...prev, ...archiveRecords]);
+      logChange(
+        expired.length === 1
+          ? `Evento "${expired[0].name}" archiviato automaticamente (concluso)`
+          : `${expired.length} eventi archiviati automaticamente (conclusi)`
+      );
     }
 
     function removeExpiredRemote() {
@@ -1433,10 +1593,24 @@ export default function App() {
         .then((res) => res.json())
         .then((remoteRaw) => {
           const remote = normalizeRemote(remoteRaw);
-          const { stillValid, changed } = removeExpired(remote.events);
-          if (!changed) return;
+          const { stillValid, expired } = splitExpired(remote.events);
+          if (expired.length === 0) return;
           const validIds = new Set(stillValid.map((e) => e.id));
           const trimmedAssignments = remote.assignments.filter((a) => validIds.has(a.eventId));
+          const archiveRecords = expired.map((ev) =>
+            buildArchiveRecord(ev, remote.assignments, remote.items, remote.cameramen)
+          );
+          const nextArchived = [...remote.archivedEvents, ...archiveRecords];
+          const logEntry = {
+            id: uid("log"),
+            ts: Date.now(),
+            who: "Sistema",
+            action:
+              expired.length === 1
+                ? `Evento "${expired[0].name}" archiviato automaticamente (concluso)`
+                : `${expired.length} eventi archiviati automaticamente (conclusi)`,
+          };
+          const nextChangelog = [...remote.changelog, logEntry].slice(-MAX_CHANGELOG_ENTRIES);
           return fetch(withAuth(FIREBASE_DATA_URL, authToken), {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
@@ -1445,6 +1619,8 @@ export default function App() {
               cameramen: remote.cameramen,
               events: stillValid,
               assignments: trimmedAssignments,
+              archivedEvents: nextArchived,
+              changelog: nextChangelog,
             }),
           });
         })
@@ -1461,6 +1637,7 @@ export default function App() {
       removeExpiredRemote();
     }, 60 * 1000);
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* Pulsante "Carica dati condivisi": sostituisce lo stato locale con
@@ -1478,6 +1655,8 @@ export default function App() {
         setCameramen(n.cameramen);
         setEvents(n.events);
         setAssignments(n.assignments);
+        setArchivedEvents(n.archivedEvents);
+        setChangelog(n.changelog);
         setConflictEventIds(new Set());
         lastEventSignaturesRef.current = buildEventSignatures(n.events, n.assignments);
         setSyncStatus("pronto");
@@ -1524,11 +1703,20 @@ export default function App() {
           return;
         }
         setConflictEventIds(new Set());
+        const mergedArchived = mergeById(remote.archivedEvents, archivedEvents);
+        const mergedChangelog = mergeById(remote.changelog, changelog)
+          .sort((a, b) => a.ts - b.ts)
+          .slice(-MAX_CHANGELOG_ENTRIES);
         return fetch(withAuth(FIREBASE_DATA_URL, authToken), {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items, cameramen, events, assignments }),
+          body: JSON.stringify({
+            items, cameramen, events, assignments,
+            archivedEvents: mergedArchived, changelog: mergedChangelog,
+          }),
         }).then(() => {
+          setArchivedEvents(mergedArchived);
+          setChangelog(mergedChangelog);
           setSyncStatus("pronto");
           setLastSyncAt(new Date());
           showToast("Modifiche condivise con tutti.");
@@ -1598,6 +1786,26 @@ export default function App() {
   }
 
   const cameramanName = (id) => cameramen.find((c) => c.id === id)?.name || null;
+
+  /* Chi sta facendo l'azione in questo momento, in una forma leggibile per
+     il registro modifiche. Per un cameraman con identità fissata (o
+     comunque già selezionata) usa il suo nome, altrimenti il ruolo. */
+  function currentActorLabel() {
+    if (role === "responsabile") return "Responsabile";
+    if (role === "cameraman") return cameramanName(cameramanId) || "Cameraman";
+    return "Sconosciuto";
+  }
+
+  /* Aggiunge una voce al registro modifiche (locale: come ogni altra
+     modifica arriva agli altri solo con "Condividi le mie modifiche").
+     Tagliato a MAX_CHANGELOG_ENTRIES voci più recenti. */
+  function logChange(action) {
+    setChangelog((prev) => {
+      const entry = { id: uid("log"), ts: Date.now(), who: currentActorLabel(), action };
+      const next = [...prev, entry];
+      return next.length > MAX_CHANGELOG_ENTRIES ? next.slice(next.length - MAX_CHANGELOG_ENTRIES) : next;
+    });
+  }
 
   function itemsForEvent(eventId) {
     return assignments
@@ -1691,6 +1899,7 @@ export default function App() {
         fromDate, fromTime: fromTime || "00:00",
         toDate: toDate || fromDate, toTime: toTime || "23:59",
       }]);
+      logChange(`Evento "${name.trim()}" creato per ${cameramanName(camId) || "nessun cameraman"}`);
     } else if (!eventId) {
       showToast("Scegli un evento esistente.");
       return;
@@ -1698,6 +1907,10 @@ export default function App() {
 
     const assignId = uid("a");
     setAssignments((prev) => [...prev, { id: assignId, itemId, eventId: targetEventId }]);
+    if (mode !== "new") {
+      const targetEvent = events.find((e) => e.id === targetEventId);
+      logChange(`Materiale ${itemId} assegnato all'evento "${targetEvent?.name || targetEventId}"`);
+    }
     setEventForm(emptyEventForm);
     showToast("Materiale assegnato all'evento.");
   }
@@ -1705,13 +1918,17 @@ export default function App() {
   function addItemToEvent(eventId, itemId) {
     const assignId = uid("a");
     setAssignments((prev) => [...prev, { id: assignId, itemId, eventId }]);
+    const ev = events.find((e) => e.id === eventId);
+    logChange(`Materiale ${itemId} aggiunto all'evento "${ev?.name || eventId}"`);
     showToast("Materiale aggiunto all'evento.");
   }
 
   function removeItemFromEvent(assignmentId) {
     const a = assignments.find((x) => x.id === assignmentId);
     if (!a) return;
+    const ev = events.find((e) => e.id === a.eventId);
     setAssignments((prev) => prev.filter((x) => x.id !== assignmentId));
+    logChange(`Materiale ${a.itemId} rimosso dall'evento "${ev?.name || a.eventId}"`);
     showToast(`${a.itemId} rientrato in magazzino.`);
   }
 
@@ -1743,16 +1960,20 @@ export default function App() {
 
     setAssignments((prev) => prev.filter((a) => a.eventId !== eventId));
     setEvents((prev) => prev.filter((e) => e.id !== eventId));
+    logChange(`Evento "${event.name}" eliminato manualmente`);
     showToast("Evento chiuso, materiale rientrato.");
   }
 
   function reassignEventCameraman(eventId, newCameramanId) {
+    const ev = events.find((e) => e.id === eventId);
     setEvents((prev) => prev.map((e) => (e.id === eventId ? { ...e, cameramanId: newCameramanId } : e)));
+    logChange(`Evento "${ev?.name || eventId}" riassegnato a ${cameramanName(newCameramanId) || "nessun cameraman"}`);
     showToast("Cameraman dell'evento aggiornato.");
   }
 
   function setItemManualStatus(itemId, status) {
     setItems((prev) => prev.map((i) => (i.id === itemId ? { ...i, status } : i)));
+    logChange(`Materiale ${itemId} impostato come "${status}"`);
   }
 
   function setItemNote(itemId, note) {
@@ -1763,6 +1984,7 @@ export default function App() {
     if (!newItem.id || !newItem.name) { showToast("Inserisci codice e nome del materiale."); return; }
     if (items.some((i) => i.id === newItem.id)) { showToast("Codice già esistente."); return; }
     setItems([...items, { ...newItem, status: "disponibile", note: "" }]);
+    logChange(`Materiale "${newItem.name}" (${newItem.id}) aggiunto al magazzino`);
     setNewItem({ id: "", name: "", category: "camera" });
     showToast("Materiale aggiunto al magazzino.");
   }
@@ -1770,6 +1992,7 @@ export default function App() {
   function removeItem(id) {
     setAssignments((prev) => prev.filter((a) => a.itemId !== id));
     setItems((prev) => prev.filter((i) => i.id !== id));
+    logChange(`Materiale ${id} eliminato dal magazzino`);
   }
 
   function exportItemsToExcel() {
@@ -1821,6 +2044,7 @@ export default function App() {
           return Array.from(map.values());
         });
 
+        logChange(`Importazione Excel materiale: ${added} aggiunti, ${updated} aggiornati${skipped ? `, ${skipped} ignorati` : ""}`);
         showToast(`Importazione completata: ${added} aggiunti, ${updated} aggiornati${skipped ? `, ${skipped} righe senza codice ignorate` : ""}.`);
       } catch (err) {
         showToast("Il file non sembra un Excel valido (colonne attese: Codice, Nome, Categoria, Stato, Nota).");
@@ -1829,30 +2053,64 @@ export default function App() {
     reader.readAsArrayBuffer(file);
   }
 
+  /* true se quell'email è già usata da un ALTRO cameraman (confronto senza
+     maiuscole/minuscole e senza spazi ai lati, per evitare doppioni che
+     sembrano diversi solo per come sono scritti). */
+  function isEmailTakenByAnother(email, excludeId) {
+    const normalized = email.trim().toLowerCase();
+    if (!normalized) return false;
+    return cameramen.some((c) => c.id !== excludeId && (c.email || "").trim().toLowerCase() === normalized);
+  }
+
   function addCameraman() {
     if (!newCameraman.trim()) return;
+    if (isEmailTakenByAnother(newCameramanEmail, null)) {
+      showToast("Questa email è già usata da un altro cameraman.");
+      return;
+    }
     setCameramen((prev) => [
       ...prev,
       { id: uid("cm"), name: newCameraman.trim(), email: newCameramanEmail.trim(), password: "" },
     ]);
+    logChange(`Cameraman "${newCameraman.trim()}" aggiunto`);
     setNewCameraman("");
     setNewCameramanEmail("");
     showToast("Cameraman aggiunto.");
   }
 
   function setCameramanEmail(id, email) {
+    if (isEmailTakenByAnother(email, id)) {
+      showToast("Questa email è già usata da un altro cameraman.");
+      return;
+    }
     setCameramen((prev) => prev.map((c) => (c.id === id ? { ...c, email } : c)));
   }
 
   function setCameramanPassword(id, password) {
+    const cam = cameramen.find((c) => c.id === id);
     setCameramen((prev) => prev.map((c) => (c.id === id ? { ...c, password } : c)));
+    if (!password) logChange(`Password personale rimossa per ${cam?.name || id}`);
   }
 
+  /* Le password generiche: una password personale non deve mai coincidere
+     con queste, altrimenti chi la riceve entrerebbe "come responsabile"
+     o come cameraman generico invece che con la propria identità. */
   function generateRandomPassword() {
     const words = ["aquila", "tigre", "faro", "onda", "monte", "stella", "falco", "vento", "sole", "luna"];
-    const word = words[Math.floor(Math.random() * words.length)];
-    const num = Math.floor(100 + Math.random() * 900);
-    return `${word}${num}`;
+    let candidate;
+    let attempts = 0;
+    do {
+      const word = words[Math.floor(Math.random() * words.length)];
+      const num = Math.floor(100 + Math.random() * 900);
+      candidate = `${word}${num}`;
+      attempts++;
+    } while (
+      attempts < 30 &&
+      (candidate === RESPONSABILE_PASSWORD ||
+        candidate === CAMERAMAN_PASSWORD ||
+        cameramen.some((c) => c.password === candidate))
+    );
+    return candidate;
   }
 
   /* Genera una nuova password personale per il cameraman e la invia
@@ -1871,6 +2129,7 @@ export default function App() {
       .then((result) => {
         if (result === "ok") {
           setCameramanPassword(c.id, newPassword);
+          logChange(`Password personale generata e inviata via email a ${c.name}`);
           showToast(`Password generata e inviata a ${c.email}.`);
         } else if (result === "non-configurato") {
           showToast("EmailJS non è ancora configurato: la password non è stata generata né inviata.");
@@ -1892,11 +2151,13 @@ export default function App() {
       if (!ok) return;
     }
     const theirEventIds = theirEvents.map((e) => e.id);
+    const camName = cameramen.find((c) => c.id === id)?.name || id;
     setAssignments((prev) => prev.filter((a) => !theirEventIds.includes(a.eventId)));
     setEvents((prev) => prev.filter((e) => e.cameramanId !== id));
     const remaining = cameramen.filter((c) => c.id !== id);
     setCameramen(remaining);
     if (cameramanId === id && remaining.length > 0) setCameramanId(remaining[0].id);
+    logChange(`Cameraman "${camName}" eliminato${theirEvents.length > 0 ? ` (${theirEvents.length} evento/i chiuso/i)` : ""}`);
     showToast("Cameraman eliminato, suoi eventi chiusi.");
   }
 
@@ -1913,6 +2174,7 @@ export default function App() {
     { key: "materiale", label: "Materiale", icon: Package, roles: ["responsabile"] },
     { key: "eventi", label: "Eventi", icon: ClipboardList, roles: ["responsabile"] },
     { key: "cameramen", label: "Cameraman", icon: Users, roles: ["responsabile"] },
+    { key: "storico", label: "Storico", icon: Archive, roles: ["responsabile"] },
     { key: "mie", label: "I miei eventi", icon: Folder, roles: ["cameraman"] },
   ];
   const visibleNav = NAV.filter((n) => n.roles.includes(role));
@@ -2404,7 +2666,24 @@ export default function App() {
                           </span>
                         </div>
                         <div>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: TOKENS.textMute, marginBottom: 4 }}>Eventi assegnati</div>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: TOKENS.textMute }}>Eventi assegnati</div>
+                            {theirEvents.length > 0 && (
+                              <button
+                                onClick={() =>
+                                  downloadTextFile(
+                                    `eventi-${c.name.replace(/\s+/g, "-")}.ics`,
+                                    buildICS(theirEvents, assignments, items, `SkySportGear — ${c.name}`),
+                                    "text/calendar"
+                                  )
+                                }
+                                title="Scarica gli eventi di questo cameraman in un file .ics"
+                                style={{ background: "transparent", border: `1px solid ${TOKENS.line}`, borderRadius: 5, color: TOKENS.text, padding: "3px 8px", fontSize: 11, cursor: "pointer" }}
+                              >
+                                .ics
+                              </button>
+                            )}
+                          </div>
                           {theirEvents.length === 0 && <span style={{ fontSize: 14, color: TOKENS.textMute }}>Nessun evento assegnato.</span>}
                           {theirEvents.map((ev) => {
                             const evR = eventRange(ev);
@@ -2433,6 +2712,105 @@ export default function App() {
           </div>
         )}
 
+        {/* ---------------- STORICO (responsabile) ---------------- */}
+        {activeTab === "storico" && role === "responsabile" && (() => {
+          const sortedArchived = [...archivedEvents].sort((a, b) => b.archivedAt - a.archivedAt);
+          const sortedLog = [...changelog].sort((a, b) => b.ts - a.ts);
+          const materialStats = computeMaterialStats(archivedEvents);
+          const cameramanStats = computeCameramanStats(archivedEvents);
+          const fmtHours = (h) => `${h.toFixed(1)} h`;
+          return (
+            <div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+                <button
+                  onClick={() => setStoricoView("eventi")}
+                  style={{
+                    background: storicoView === "eventi" ? TOKENS.amber : TOKENS.panelRaised,
+                    color: storicoView === "eventi" ? "#1A1A1A" : TOKENS.text,
+                    border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "8px 14px", fontWeight: 700, fontSize: 15, cursor: "pointer",
+                  }}
+                >
+                  Eventi archiviati e statistiche
+                </button>
+                <button
+                  onClick={() => setStoricoView("log")}
+                  style={{
+                    background: storicoView === "log" ? TOKENS.amber : TOKENS.panelRaised,
+                    color: storicoView === "log" ? "#1A1A1A" : TOKENS.text,
+                    border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "8px 14px", fontWeight: 700, fontSize: 15, cursor: "pointer",
+                  }}
+                >
+                  Registro modifiche
+                </button>
+              </div>
+
+              {storicoView === "eventi" && (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14, marginBottom: 22 }}>
+                    <div style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 14 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 10 }}>
+                        Materiale più usato
+                      </div>
+                      {materialStats.length === 0 && <span style={{ fontSize: 14, color: TOKENS.textMute }}>Nessun dato ancora.</span>}
+                      {materialStats.slice(0, 8).map((m) => (
+                        <div key={m.itemId} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 14, padding: "4px 0" }}>
+                          <span style={{ color: TOKENS.text }}>{m.itemName} <span style={{ color: TOKENS.textMute, fontSize: 12 }}>({m.itemId})</span></span>
+                          <span style={{ color: TOKENS.textMute, whiteSpace: "nowrap" }}>{fmtHours(m.hours)} · {m.uses}×</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 14 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 10 }}>
+                        Ore per cameraman
+                      </div>
+                      {cameramanStats.length === 0 && <span style={{ fontSize: 14, color: TOKENS.textMute }}>Nessun dato ancora.</span>}
+                      {cameramanStats.map((c) => (
+                        <div key={c.name} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 14, padding: "4px 0" }}>
+                          <span style={{ color: TOKENS.text }}>{c.name}</span>
+                          <span style={{ color: TOKENS.textMute, whiteSpace: "nowrap" }}>{fmtHours(c.hours)} · {c.events} evento/i</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: 16, fontWeight: 700, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
+                    Eventi conclusi ({sortedArchived.length})
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {sortedArchived.length === 0 && <div style={{ color: TOKENS.textMute, fontSize: 16 }}>Nessun evento archiviato finora.</div>}
+                    {sortedArchived.map((ev) => (
+                      <div key={ev.id} style={{ background: TOKENS.panel, border: `1px solid ${TOKENS.line}`, borderRadius: 8, padding: 12 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
+                          <span style={{ fontWeight: 700, fontSize: 15, color: TOKENS.text }}>{ev.name}</span>
+                          <span style={{ fontSize: 13, color: TOKENS.textMute }}>{formatEventWhen(ev)} · {fmtHours(ev.durationHours)}</span>
+                        </div>
+                        <div style={{ fontSize: 13, color: TOKENS.textMute, marginTop: 4 }}>
+                          {ev.cameramanName} — {ev.items.length > 0 ? ev.items.map((i) => i.itemName).join(", ") : "Nessun materiale"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {storicoView === "log" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {sortedLog.length === 0 && <div style={{ color: TOKENS.textMute, fontSize: 16 }}>Nessuna modifica registrata finora.</div>}
+                  {sortedLog.map((entry) => (
+                    <div key={entry.id} style={{ display: "flex", gap: 10, fontSize: 14, padding: "6px 0", borderBottom: `1px solid ${TOKENS.line}` }}>
+                      <span style={{ color: TOKENS.textMute, whiteSpace: "nowrap", fontSize: 12.5 }}>
+                        {new Date(entry.ts).toLocaleString("it-IT")}
+                      </span>
+                      <span style={{ color: TOKENS.amber, fontWeight: 700, whiteSpace: "nowrap" }}>{entry.who}</span>
+                      <span style={{ color: TOKENS.text }}>{entry.action}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* ---------------- I MIEI EVENTI (cameraman) ---------------- */}
         {activeTab === "mie" && role === "cameraman" && (
           <div>
@@ -2451,8 +2829,25 @@ export default function App() {
                   getAvailableItems={getAvailableItems}
                   onSubmit={() => submitEventAssignment(cameramanId)}
                 />
-                <div style={{ fontSize: 18, fontWeight: 700, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>
-                  I tuoi eventi
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: TOKENS.textMute, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                    I tuoi eventi
+                  </div>
+                  {myEvents.length > 0 && (
+                    <button
+                      onClick={() =>
+                        downloadTextFile(
+                          `eventi-${(cameramanName(cameramanId) || "cameraman").replace(/\s+/g, "-")}.ics`,
+                          buildICS(myEvents, assignments, items, `SkySportGear — ${cameramanName(cameramanId) || ""}`),
+                          "text/calendar"
+                        )
+                      }
+                      title="Scarica tutti i tuoi eventi in un unico file da importare nel calendario"
+                      style={{ background: TOKENS.panelRaised, border: `1px solid ${TOKENS.line}`, borderRadius: 6, padding: "7px 12px", color: TOKENS.text, fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+                    >
+                      Esporta tutti (.ics)
+                    </button>
+                  )}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {myEvents.length === 0 && <div style={{ color: TOKENS.textMute, fontSize: 18.5 }}>Nessun evento attivo al momento.</div>}
