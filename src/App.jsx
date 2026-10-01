@@ -920,10 +920,10 @@ const PRESENCE_CLEANUP_MS = 5 * 60 * 1000; // dopo quanto una voce "morta" viene
    il riepilogo delle modifiche condivise. Finché restano "INSERISCI_...",
    l'invio delle email viene semplicemente saltato (nessun errore visibile).
 --------------------------------------------------------- */
-const EMAILJS_SERVICE_ID = "INSERISCI_SERVICE_ID";
-const EMAILJS_TEMPLATE_ID = "INSERISCI_TEMPLATE_ID";
-const EMAILJS_TEMPLATE_ID_CREDENTIALS = "INSERISCI_TEMPLATE_ID_CREDENZIALI";
-const EMAILJS_PUBLIC_KEY = "INSERISCI_PUBLIC_KEY";
+const EMAILJS_SERVICE_ID = "service_2mijoho";
+const EMAILJS_TEMPLATE_ID = "template_9xyspfi";
+const EMAILJS_TEMPLATE_ID_CREDENTIALS = "template_0egt39e";
+const EMAILJS_PUBLIC_KEY = "BMv8Mnq185_KBYiUX";
 const RESPONSABILE_NOTIFICATION_EMAIL = "INSERISCI_EMAIL_RESPONSABILE";
 
 function isConfigured(value) {
